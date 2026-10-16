@@ -6,9 +6,7 @@ test.  It is not intended as an original work.
 A remote MCP server that lets an AI agent create, read, update and delete the
 user's Google Tasks and task lists.
 
-The server is **stateless and holds no secrets**. The client agent does the
-OAuth2 flow with Google itself and sends the resulting access token on every
-request:
+Every MCP request carries a Google OAuth access token for the Tasks scope:
 
 ```http
 Authorization: Bearer <google-access-token>
@@ -18,29 +16,49 @@ The server checks the token with Google's tokeninfo endpoint, uses it to call
 the Tasks API for that one request, and discards it. Tokens are never written
 to disk or logged. A successful verification is cached in memory for at most
 60 seconds (and never past the token's expiry), so that a burst of tool calls
-doesn't mean a burst of tokeninfo calls. Refreshing expired tokens is the
-client's job: no refresh token or client secret ever reaches this server.
+doesn't mean a burst of tokeninfo calls. A token that is valid but lacks the
+Tasks scope gets a `403` with `error="insufficient_scope"`.
 
-## Client requirements
+Clients that follow the MCP authorization spec discover how to get a token
+automatically: an unauthenticated request gets a `401` whose
+`WWW-Authenticate` header points at `/.well-known/oauth-protected-resource/mcp`
+(RFC 9728). What that names as the authorization server depends on the mode.
 
-The connecting agent needs:
+### Mode 1: clients bring their own Google token (no server secrets)
 
-- A Google Cloud project with the **Google Tasks API** enabled, and an OAuth
-  client ID (and secret, for a web/confidential client) of its own.
-- An access token granted the scope `https://www.googleapis.com/auth/tasks`.
-- To send that token as a Bearer header on every MCP request, to
-  `https://<host>/mcp` (Streamable HTTP transport).
+By default the metadata names `https://accounts.google.com` and the server
+holds no secrets at all. The client needs its own Google Cloud OAuth client
+(with the Google Tasks API enabled) and does the OAuth flow with Google
+itself. Google does not support dynamic client registration, so this only
+suits clients that can be preconfigured with a Google client ID.
 
-Clients that follow the MCP authorization spec can discover the details
-automatically. An unauthenticated request gets a `401` whose
-`WWW-Authenticate` header points at
-`/.well-known/oauth-protected-resource/mcp` (RFC 9728), which names
-`https://accounts.google.com` as the authorization server and the Tasks scope
-as required. Google does not support dynamic client registration, so the
-client must be preconfigured with its Google client ID.
+### Mode 2: built-in sign-in broker (for clients that register themselves)
 
-A token that is valid but lacks the Tasks scope gets a `403` with
-`error="insufficient_scope"`.
+Many MCP clients insist on registering themselves with the authorization
+server (RFC 7591 dynamic client registration). For those, give the server a
+Google OAuth **web application** client (`GTASKS_MCP_GOOGLE_CLIENT_FILE`).
+The server then acts as the authorization server clients see, offering
+`/register`, `/authorize`, `/token` and `/revoke`, and signs users in with
+Google:
+
+1. The client registers at `/register` and sends the user to `/authorize`.
+2. The server redirects the user to Google sign-in, which returns to
+   `/oauth/google/callback`.
+3. The client redeems its code (with PKCE) at `/token` and receives Google's
+   own access token, plus a refresh token that only works through this server.
+
+The Google client secret is the only secret involved. The server still
+**stores nothing**: client registrations, sign-in state, authorization codes
+and refresh tokens are encrypted and authenticated with a key derived from
+that secret, and handed to the client to hold. A registration therefore
+survives server restarts, and rotating the Google client secret invalidates
+every registration and refresh token, so clients must reconnect.
+
+Set up the Google client in the Google Cloud Console (APIs & Services →
+Credentials → Create credentials → OAuth client ID → *Web application*), with
+the authorized redirect URI `https://<host>/oauth/google/callback`, and
+download its JSON. Keep the OAuth consent screen *in production* rather than
+*testing*: in testing mode, Google expires refresh tokens after 7 days.
 
 ## Running
 
@@ -49,7 +67,8 @@ uv sync
 GTASKS_MCP_PUBLIC_URL=https://tasks.example.com/mcp uv run gtasks-mcp
 ```
 
-Configuration is through environment variables. None of them are secret.
+Configuration is through environment variables. None of them are secret; the
+Google client file they may point to is.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -57,8 +76,9 @@ Configuration is through environment variables. None of them are secret.
 | `GTASKS_MCP_HOST` | `127.0.0.1` | Interface to listen on. |
 | `GTASKS_MCP_PORT` | `8000` | Port to listen on. |
 | `GTASKS_MCP_ALLOWED_CLIENT_IDS` | *(any)* | Comma-separated Google OAuth client IDs whose tokens are accepted. Recommended in production, so tokens minted for unrelated apps are refused. |
-| `GTASKS_MCP_ALLOWED_ORIGINS` | *(none)* | Comma-separated extra browser `Origin` values to accept (requests with no `Origin` header are always allowed). |
-| `GTASKS_MCP_LOG_LEVEL` | `INFO` | At `DEBUG`, each request's method, path and header *names* are logged, which helps when working out what a client sends. Header values are never logged. |
+| `GTASKS_MCP_ALLOWED_ORIGINS` | *(none)* | Comma-separated browser `Origin` values allowed to call `/mcp` (CORS), beyond the public URL's own. Needed for clients that run in a browser. Requests with no `Origin` header are always allowed. |
+| `GTASKS_MCP_GOOGLE_CLIENT_FILE` | *(none)* | Google OAuth web client JSON; enables the sign-in broker (mode 2). If unset, the systemd credential `google-client.json` is used when loaded (`LoadCredential=`). The broker's own client ID is automatically added to the allowed client IDs. |
+| `GTASKS_MCP_LOG_LEVEL` | `INFO` | At `DEBUG`, each request's method, path, `Origin` and header *names* are logged, which helps when working out what a client sends. Other header values are never logged. |
 
 The server speaks plain HTTP and is meant to sit behind a TLS-terminating
 reverse proxy that forwards paths unchanged. Requests are only accepted with a

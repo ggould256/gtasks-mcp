@@ -53,3 +53,16 @@ def test_bare_host_url_serves_default_path():
 def test_invalid_config(env):
     with pytest.raises(ConfigError):
         Settings.from_env(env)
+
+
+def test_google_client_file_from_env_or_systemd_credentials(tmp_path):
+    base = {"GTASKS_MCP_PUBLIC_URL": "https://tasks.example.com/mcp"}
+    assert Settings.from_env(base).google_client_file is None
+
+    explicit = Settings.from_env({**base, "GTASKS_MCP_GOOGLE_CLIENT_FILE": "/etc/x.json"})
+    assert str(explicit.google_client_file) == "/etc/x.json"
+
+    assert Settings.from_env({**base, "CREDENTIALS_DIRECTORY": str(tmp_path)}).google_client_file is None
+    (tmp_path / "google-client.json").write_text("{}")
+    loaded = Settings.from_env({**base, "CREDENTIALS_DIRECTORY": str(tmp_path)})
+    assert loaded.google_client_file == tmp_path / "google-client.json"

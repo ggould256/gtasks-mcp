@@ -64,7 +64,9 @@ class Harness:
     @asynccontextmanager
     async def http_client(self, token: str | None = None):
         """An httpx2 client wired to the app in-process, with the app's lifespan running."""
-        starlette_app = self.app.app  # unwrap RequestLogMiddleware to reach the lifespan
+        starlette_app = self.app
+        while not hasattr(starlette_app, "router"):  # unwrap middleware to reach the lifespan
+            starlette_app = starlette_app.app
         headers = {"authorization": f"Bearer {token}"} if token else {}
         async with starlette_app.router.lifespan_context(starlette_app):
             async with httpx2.AsyncClient(

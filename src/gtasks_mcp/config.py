@@ -1,7 +1,8 @@
 """Server configuration, read from environment variables.
 
-None of these settings are secret: Google credentials are supplied per request
-by the client and are never part of the server's configuration.
+None of these settings are secret. The one secret the server can use, the
+Google OAuth client for the built-in sign-in broker, is read from a separate
+file (see `google_client_file`), normally a root-only systemd credential.
 """
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from urllib.parse import urlparse
 
 _PREFIX = "GTASKS_MCP_"
@@ -41,6 +43,11 @@ class Settings:
     """Extra browser Origin values to accept, beyond the public URL's own origin."""
 
     log_level: str = "INFO"
+
+    google_client_file: Path | None = None
+    """Google OAuth web client JSON. When set, this server is also the OAuth
+    authorization server MCP clients register with, signing users in with
+    Google; when unset, clients must obtain Google tokens themselves."""
 
     def __post_init__(self) -> None:
         """Validate the public URL so misconfiguration fails at startup, not on first request."""
@@ -93,4 +100,19 @@ class Settings:
             allowed_client_ids=_split_list(env.get(f"{_PREFIX}ALLOWED_CLIENT_IDS")),
             allowed_origins=_split_list(env.get(f"{_PREFIX}ALLOWED_ORIGINS")),
             log_level=env.get(f"{_PREFIX}LOG_LEVEL", "INFO").upper(),
+            google_client_file=_google_client_file(env),
         )
+
+
+_CREDENTIAL_NAME = "google-client.json"
+
+
+def _google_client_file(env: Mapping[str, str]) -> Path | None:
+    """GTASKS_MCP_GOOGLE_CLIENT_FILE, else the systemd credential of that name if loaded."""
+    if explicit := env.get(f"{_PREFIX}GOOGLE_CLIENT_FILE"):
+        return Path(explicit)
+    if credentials_dir := env.get("CREDENTIALS_DIRECTORY"):
+        candidate = Path(credentials_dir) / _CREDENTIAL_NAME
+        if candidate.exists():
+            return candidate
+    return None
